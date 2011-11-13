@@ -14,21 +14,20 @@ function unshred($filename) {
   if (!$img) die('Unable to read image');
 
   $slice_order = analyze_slices($img);
-
   return reorder_slices($img, $slice_order);
 }
 
 
-// get gray value of an rgb image
+// convert the rgb color at an image to a gray value
 function gray_at($src, $x, $y) {
   $rgb = imagecolorat($src, $x, $y);
   $r = ($rgb >> 16) & 0xFF;
   $g = ($rgb >> 8) & 0xFF;
   $b = $rgb & 0xFF;
-  return round($r*.3 + $g*.59 + $b*.11);
+  return round($r*.3 + $g*.59 + $b*.11); // http://en.wikipedia.org/wiki/Grayscale#Converting_color_to_grayscale
 }
 
-
+// generate an image given the order of the slices
 function reorder_slices($src, $slice_order, $slice_width = 32) {
   $width = imagesx($src);
   $height = imagesy($src);
@@ -75,12 +74,13 @@ function analyze_slices($src, $slice_width = 32) {
   $data = array();
   for ($i = 0; $i < $num_slices; $i++) {
     for ($j = 0; $j < $num_slices; $j++) {
-      if ($i >= $j) continue;
-      $comparison = compare_slice($profile, $i, $j, $height, 'closest_match');
-      $data[$i]['left'][$j] = $comparison['left'];
-      $data[$i]['right'][$j] = $comparison['right'];
-      $data[$j]['left'][$i] = $comparison['right'];
-      $data[$j]['right'][$i] = $comparison['left'];
+      if ($i < $j) {
+        $comparison = compare_slice($profile, $i, $j, $height, 'closest_match');
+        $data[$i]['left'][$j] = $comparison['left'];
+        $data[$i]['right'][$j] = $comparison['right'];
+        $data[$j]['left'][$i] = $comparison['right'];
+        $data[$j]['right'][$i] = $comparison['left'];
+      }
     }
   }
   for ($i = 0; $i < $num_slices; $i++) {
@@ -92,32 +92,14 @@ function analyze_slices($src, $slice_width = 32) {
     }
   }
 
+  // find 'best' left and right slices for each slice
   $slice_data = array();
-  // find sides of each piece
-  for ($j = 0; $j < $num_slices; $j++) {
-    $check = $j;
-    $findings = array(
-      'left' => null,
-      'left_value' => null,
-      'right' => null,
-      'right_value' => null,
-    );
-    for ($i = 0; $i < $num_slices; $i++) {
-      if ($i != $check) {
-        if ($findings['left'] === null || $findings['left_value'] > $data[$check]['left'][$i]) {
-          $findings['left'] = $i;
-          $findings['left_value'] = $data[$check]['left'][$i];
-        }
-        if ($findings['right'] === null || $findings['right_value'] > $data[$check]['right'][$i]) {
-          $findings['right'] = $i;
-          $findings['right_value'] = $data[$check]['right'][$i];
-        }
-      }
-    }
-    $slice_data[$j] = $findings;
+  for ($i = 0; $i < $num_slices; $i++) {
+    $slice_data[$i]['left'] = find_min_slice($data[$i]['left']);
+    $slice_data[$i]['right'] = find_min_slice($data[$i]['right']);
   }
 
-  // try to find sequences
+  // try to find sequences, count how many times each sequence occurs and return the 'best'
   // might as well start at the beginning
   $ok = array();
   for ($i = 0; $i < $num_slices; $i++) {
@@ -138,6 +120,14 @@ function analyze_slices($src, $slice_width = 32) {
   return explode(':', $best_sequence);
 }
 
+function find_min_slice($slices) {
+  $min_value = min($slices);
+  foreach ($slices as $key => $value) {
+    if ($value == $min_value) return $key;
+  }
+  die('how could this happen?');
+}
+
 
 function stitch($slice_data, $start) {
   $num_slices = count($slice_data);
@@ -153,28 +143,23 @@ function stitch($slice_data, $start) {
     unset($have[$start]);
     $sequence = "$left:$start:$right";
   }
-  // try moving right
-  $current_slice = $slice_data[$start]['right'];
-  while ($current_slice !== false) {
-    unset($have[$current_slice]); // we looked at this slice
-    $right = $slice_data[$current_slice]['right'];
-    if (isset($have[$right])) {
-      $current_slice = $right;
-      $sequence .= ':' . $current_slice;
-    } else {
-      $current_slice = false;
-    }
-  }
-  // try going left
-  $current_slice = $slice_data[$start]['left'];
-  while ($current_slice) {
-    unset($have[$current_slice]); // we looked at this slice
-    $left = $slice_data[$current_slice]['left'];
-    if (isset($have[$left])) {
-      $current_slice = $left;
-      $sequence = $current_slice . ':' . $sequence;
-    } else {
-      $current_slice = false;
+
+  $directions = array('right', 'left');
+  foreach ($directions as $direction) {
+    $current_slice = $slice_data[$start][$direction];
+    while ($current_slice !== false) { // need strict equals because 0 == false
+      unset($have[$current_slice]); // we looked at this slice
+      $next_slice = $slice_data[$current_slice][$direction];
+      if (isset($have[$next_slice])) {
+        if ($direction == 'right') {
+          $sequence .= ':' . $next_slice;
+        } else {
+          $sequence = $next_slice . ':' . $sequence;
+        }
+        $current_slice = $next_slice;
+      } else {
+        $current_slice = false;
+      }
     }
   }
 
@@ -182,29 +167,22 @@ function stitch($slice_data, $start) {
 }
 
 
-
+// calculate score for each slice, lower = better match
 function compare_slice($profile, $slice1, $slice2, $height, $score_function) {
-  $p1 = $profile[$slice1];
-  $p2 = $profile[$slice2];
+  $compare = array(
+    'left' => 0,
+    'right' => 0,
+  );
 
-  $sum1 = 0;
-  $sum2 = 0;
   for ($y = 0; $y < $height; $y++) {
-    // compare p1 left to p2 right
-    $a1 = $p1['left'][$y];
-    $b1 = $p2['right'][$y];
-    $c1 = abs($a1 - $b1);
-    $c1 = $score_function($p1['left'], $p2['right'], $y);
-    $sum1 += $c1;
-    // compare p1 right to p2 left
-    $a2 = $p1['right'][$y];
-    $b2 = $p2['left'][$y];
-    $c2 = abs($a2 - $b2);
-    $c2 = $score_function($p1['right'], $p2['left'], $y);
-    $sum2 += $c2;
+    foreach ($compare as $side => $score) {
+      $slice1_side = $side;
+      $slice2_side = ($slice1_side == 'left') ? 'right' : 'left';
+      $compare[$side] += $score_function($profile[$slice1][$slice1_side], $profile[$slice2][$slice2_side], $y);
+    }
   }
 
-  return array('left' => $sum1, 'right' => $sum2);
+  return $compare;
 }
 
 function closest_match($p1, $p2, $y) {
