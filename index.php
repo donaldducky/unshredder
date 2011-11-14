@@ -1,8 +1,9 @@
 <?php
 
-$img = unshred('images/TokyoPanoramaShredded.png');
+//$img = unshred('images/TokyoPanoramaShredded.png');
 //$img = unshred('images/shredded_galaxy.png');
 //$img = unshred('images/shredder_flower.png');
+$img = unshred('images/shredded_flower_10.png');
 
 header('Content-Type: image/png');
 imagepng($img);
@@ -13,8 +14,10 @@ function unshred($filename) {
   $img = imagecreatefrompng($filename);
   if (!$img) die('Unable to read image');
 
-  $slice_order = analyze_slices($img);
-  return reorder_slices($img, $slice_order);
+  $slice_width = find_slice_width($img);
+
+  $slice_order = analyze_slices($img, $slice_width);
+  return reorder_slices($img, $slice_order, $slice_width);
 }
 
 
@@ -204,5 +207,98 @@ function closest_match($p1, $p2, $y) {
   }
 
   return min($a);
+}
+
+function find_slice_width($src) {
+  $ts_start = microtime(true);
+
+  $width = imagesx($src);
+  $divisors = get_divisors($width);
+
+  $avg_diff = array();
+  foreach ($divisors as $divisor) {
+    $avg_diff[$divisor] = score_slice_at_width($src, $divisor);
+  }
+
+  $total_sum = 0;
+  $total_data_points = 0;
+  foreach ($avg_diff as $divisor => $data) {
+    $total_sum += $data['sum'];
+    $total_data_points += $data['data_points'];
+  }
+  $weighted_average = $total_sum / $total_data_points;
+  $max_weight = 0;
+  $best_divisor = 0;
+  foreach ($avg_diff as $divisor => $data) {
+    $sum2 = $weighted_average * $data['data_points'];
+    $diff = abs($data['sum'] - $sum2);
+    $weight = $diff*$diff / $data['data_points'];
+    if ($weight > $max_weight) {
+      $max_weight = $weight;
+      $best_divisor = $divisor;
+    }
+  }
+
+  return $best_divisor;
+}
+
+function get_divisors($n) {
+  $max = round(sqrt($n));
+
+  $divisors = array();
+  for ($i = 1; $i <= $max; $i++) {
+    // this is the ghetto way of doing it
+    if ($n % $i == 0) {
+      $divisors[] = $i;
+      $divisors[] = $n / $i;
+    }
+  }
+  sort($divisors);
+
+  return $divisors;
+}
+
+function score_slice_at_width($src, $slice_width) {
+  $width = imagesx($src);
+  $height = imagesy($src);
+
+  if ($slice_width == $width) return array(
+    'sum' => 0,
+    'data_points' => 1,
+    'avg' => 0,
+  );
+
+  $num_slices = $width / $slice_width;
+  $sum = 0;
+  $data_points = 0;
+  // TODO: optimize this algorithm...it's O(n^2), gross
+  for ($i = 0; $i < $num_slices; $i++) {
+    // compare the pixels where the slices meet
+    $right_x = ($i + 1) * $slice_width;
+    $left_x = $right_x - 1;
+    if ($right_x < $width) {
+      $y_sum = 0;
+      for ($y = 0; $y < $height; $y++) {
+        // use same algorithm as above
+        $check = array();
+        if ($y > 0) $check[] = $y - 1;
+        $check[] = $y;
+        if ($y + 1 < $height) $check[] = $y + 1;
+        $diffs = array();
+        foreach ($check as $index) {
+          $diffs[] = abs(gray_at($src, $left_x, $y) - gray_at($src, $right_x, $index));
+        }
+        $y_sum += min($diffs);
+      }
+      $sum += $y_sum / $height;
+      $data_points++;
+    }
+  }
+
+  return array(
+    'sum' => $sum,
+    'data_points' => $data_points,
+    'avg' => $sum / $data_points,
+  );
 }
 
